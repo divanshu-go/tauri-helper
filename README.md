@@ -76,6 +76,8 @@ And then be sure your workspace is correct and has the current crate defined in 
 ```
 > Don't forget to add `.` as a member or else the crate will not be able to get the commands from the default crate.
 
+**Single-crate apps** (a bare `[workspace]` table with no `members`, like many Tauri `src-tauri` layouts) are scanned automatically — no `members` override needed.
+
 ---
 
 ## Usage

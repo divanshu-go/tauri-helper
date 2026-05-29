@@ -1,9 +1,8 @@
 use proc_macro::TokenStream;
-use proc_macro_error::proc_macro_error;
 use quote::quote;
 use std::path::Path;
 use std::{
-    collections::HashSet,
+    collections::BTreeSet,
     env,
     fs::{self},
 };
@@ -163,18 +162,31 @@ pub fn auto_collect_command(_attr: TokenStream, item: TokenStream) -> TokenStrea
     quote! { #input }.into()
 }
 
-/// Collects all Tauri commands from the workspace's command files
-fn collect_commands(calling_crate: String) -> HashSet<String> {
+fn is_specta_command_file(path: &Path) -> bool {
+    path.file_stem()
+        .and_then(|stem| stem.to_str())
+        .is_some_and(|stem| stem.ends_with("_specta"))
+}
+
+/// Collects Tauri commands from the workspace's command list files in stable sorted order.
+fn collect_commands(calling_crate: String, specta_only: bool) -> Vec<String> {
     let manifest_dir = env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR not set");
     let workspace_root = find_workspace_dir(Path::new(&manifest_dir));
     let commands_dir = workspace_root.join("target").join("tauri_commands_list");
 
-    let mut commands = HashSet::new();
+    let mut commands = BTreeSet::new();
 
     if let Ok(entries) = fs::read_dir(&commands_dir) {
-        for entry in entries.flatten() {
-            let path = entry.path();
+        let mut paths: Vec<_> = entries.flatten().map(|entry| entry.path()).collect();
+        paths.sort();
+
+        for path in paths {
             if path.is_file() && path.extension().and_then(|e| e.to_str()) == Some("txt") {
+                let is_specta_file = is_specta_command_file(&path);
+                if specta_only != is_specta_file {
+                    continue;
+                }
+
                 let crate_name = get_workspace_pkg_name();
 
                 if let Ok(content) = fs::read_to_string(&path) {
@@ -208,14 +220,14 @@ fn collect_commands(calling_crate: String) -> HashSet<String> {
         );
     }
 
-    commands
+    commands.into_iter().collect()
 }
 
 /// Generates the Specta collect_commands![] macro invocation with a list of all collected commands.
 #[proc_macro]
 pub fn specta_collect_commands(_item: TokenStream) -> TokenStream {
     let calling_crate = get_workspace_pkg_name();
-    let commands = collect_commands(calling_crate);
+    let commands = collect_commands(calling_crate, true);
 
     if commands.is_empty() {
         eprintln!(
@@ -239,7 +251,7 @@ pub fn specta_collect_commands(_item: TokenStream) -> TokenStream {
 #[proc_macro]
 pub fn tauri_collect_commands(_item: TokenStream) -> TokenStream {
     let calling_crate = get_workspace_pkg_name();
-    let commands = collect_commands(calling_crate);
+    let commands = collect_commands(calling_crate, false);
 
     if commands.is_empty() {
         eprintln!(
@@ -253,22 +265,10 @@ pub fn tauri_collect_commands(_item: TokenStream) -> TokenStream {
         .map(|fn_name| syn::parse_str::<syn::Path>(fn_name).unwrap())
         .collect::<Vec<_>>();
 
-    // generate a hidden module with a function that returns the handler,then call the function. This keeps the expansion small at the call site because RA seems to panic when this happens.
-    let expanded = quote! {
-        // hidden module to reduce type-complexity visible at call-site
-        #[doc(hidden)]
-        pub mod __tauri_helper_generated {
-            // avoid name collisions and loud lints
-            #[allow(non_snake_case, dead_code, unused_imports)]
-            pub fn __tauri_collected_handler() -> tauri::InvokeHandler {
-                tauri::generate_handler![ #(#collected_paths),* ]
-            }
-        }
-
-        __tauri_helper_generated::__tauri_collected_handler()
-    };
-
-    expanded.into()
+    quote! {
+        tauri::generate_handler![ #(#collected_paths),* ]
+    }
+    .into()
 }
 
 /// Generates an array of command names
@@ -281,7 +281,7 @@ pub fn array_collect_commands(item: TokenStream) -> TokenStream {
     let should_print = print_arg.map(|lit| lit.value()).unwrap_or(false);
 
     let calling_crate = env::var("CARGO_PKG_NAME").unwrap_or_else(|_| "unknown".to_string());
-    let commands = collect_commands(calling_crate);
+    let commands = collect_commands(calling_crate, false);
 
     if commands.is_empty() {
         return quote! { [] }.into();

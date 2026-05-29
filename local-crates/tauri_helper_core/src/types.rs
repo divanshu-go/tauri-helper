@@ -4,7 +4,14 @@ use serde::Deserialize;
 pub struct CargoToml {
     #[allow(dead_code)]
     pub package: Package,
+    #[serde(default)]
     pub workspace: Workspace,
+}
+
+#[derive(Debug, Deserialize, Default)]
+pub struct Workspace {
+    #[serde(default)]
+    pub members: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -15,11 +22,6 @@ pub struct Package {
     pub version: String,
     #[allow(dead_code)]
     pub edition: String,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct Workspace {
-    pub members: Vec<String>,
 }
 
 /// Configuration options for the `tauri_helper` crate.
@@ -57,7 +59,9 @@ pub struct TauriHelperOptions {
     /// want to automatically collect all `#[tauri::command]` functions without explicit
     /// opt-in. Use this option with caution.
     pub collect_all: bool,
-    /// Members of the workspace to scan, if `None` it will just scan every member
+    /// Workspace members to scan. When `None`, uses `[workspace].members` from the nearest
+    /// `Cargo.toml`. If that list is empty (common for single-crate apps with a bare
+    /// `[workspace]` table), the current crate (`"."`) is scanned automatically.
     pub members: Option<Vec<String>>,
 }
 
