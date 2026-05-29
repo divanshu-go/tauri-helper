@@ -53,3 +53,14 @@ pub fn get_workspace_pkg_name() -> String {
     let cont = get_workspace();
     cont.package.name
 }
+
+pub fn get_member_pkg_name(member_dir: &Path) -> String {
+    let cargo_toml = member_dir.join("Cargo.toml");
+    let contents = fs::read_to_string(&cargo_toml).unwrap_or_else(|_| {
+        panic!("Failed to read Cargo.toml at {}", cargo_toml.display())
+    });
+    let toml_content: CargoToml = toml::from_str(&contents).unwrap_or_else(|e| {
+        panic!("Failed to parse Cargo.toml at {}: {e}", cargo_toml.display())
+    });
+    toml_content.package.name
+}

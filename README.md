@@ -6,7 +6,7 @@
 ![Crates.io Size](https://img.shields.io/crates/size/tauri_helper)
 
 
-`tauri_helper` is a collection of tools and utilities designed to simplify the development of Tauri applications. It provides macros, utilities, and automation to streamline common tasks such as command collection, error handling, and workspace management.
+`tauri_helper` is a collection of tools and utilities designed to simplify the development of Tauri applications. It provides macros and automation to streamline command registration by auto-collecting every `#[tauri::command]` function across your workspace — no extra annotation required.
 
 This workspace includes the following crates:
 - **`tauri_helper_core`**: Core utilities for workspace management and command collection.
@@ -16,162 +16,99 @@ This workspace includes the following crates:
 
 ## Features
 
-### Core Features
-- **Workspace Management**: Automatically detect and manage workspace members.
-- **Command Collection**: Collect Tauri commands from workspace members and generate handler invocations.
+- **Auto command collection**: Every `#[tauri::command]` function is picked up automatically.
+- **Specta support**: Functions that also carry `#[specta::specta]` are emitted separately for TypeScript binding generation.
+- **Workspace-aware**: Scans all workspace members; single-crate apps work without any configuration.
+- **Stable ordering**: Commands are sorted alphabetically by function name in all generated output.
 
 ### Macros
-- **`#[auto_collect_command]`**: Automatically collect Tauri commands annotated with this attribute.
-- **`specta_collect_commands!`**: Generate a `tauri_specta::collect_commands!` invocation for all collected commands.
-- **`tauri_collect_commands!`**: Generate a `tauri::generate_handler!` invocation for all collected commands.
-- **`array_collect_commands!`**: Generate an array of collected command names, optionally printing them.
-- **`WithLogging`**: Automatically implement `From` for enum variants and optionally log errors using `tracing` (requires the `tracing` feature), this is extremely unstable.
+
+- **`specta_collect_commands!`**: Generates a `tauri_specta::collect_commands!` invocation for all `#[tauri::command]` + `#[specta::specta]` functions.
+- **`tauri_collect_commands!`**: Generates a `tauri::generate_handler!` invocation for all `#[tauri::command]` functions.
+- **`array_collect_commands!`**: Generates a `[&str; N]` array of collected command paths.
+- **`WithLogging`** *(requires `tracing` feature, experimental)*: Implements `From` for enum variants with automatic error logging.
 
 ---
 
 ## Installation
 
-Add `tauri-helper` to your `Cargo.toml`:
+Add `tauri-helper` to both `[dependencies]` and `[build-dependencies]` in your `Cargo.toml`:
 
 ```toml
 [dependencies]
-tauri-helper = "0.1.4"
-```
+tauri-helper = "0.2.1"
 
-If you want to use the `WithLogging` macro with `tracing`, enable the `tracing` feature:
-
-```toml
-[dependencies]
-tauri-helper = { version = "0.1.4", features = ["tracing"] }
-```
-
-Then add it to the `[build-dependencies]` :
-
-```toml
 [build-dependencies]
-tauri-helper = "0.1.4"
+tauri-helper = "0.2.1"
 ```
 
-## IMPORTANT
+To use the `WithLogging` derive macro, enable the `tracing` feature:
 
-Before using any command collection, you have to add this to the `build.rs` file.
+```toml
+[dependencies]
+tauri-helper = { version = "0.2.1", features = ["tracing"] }
+```
+
+---
+
+## Setup
+
+Call `generate_command_file` in `build.rs` **before** `tauri_build::build()`:
 
 ```rust
-    fn main() {
-        tauri_helper::generate_command_file(tauri_helper::TauriHelperOptions::default());
-        tauri_build::build();
-    }
+fn main() {
+    tauri_helper::generate_command_file(tauri_helper::TauriHelperOptions::default());
+    tauri_build::build();
+}
 ```
 
-And then be sure your workspace is correct and has the current crate defined in your `Cargo.toml` such as this :
+For multi-crate workspaces, list all members in your root `Cargo.toml`:
 
 ```toml
-    [workspace]
-    members = [
-        ".",
-        "local-crates/some-commands1",
-        "local-crates/some-commands2",
-        "local-crates/some-commands3",
-    ]
+[workspace]
+members = [
+    ".",
+    "local-crates/some-commands",
+]
 ```
-> Don't forget to add `.` as a member or else the crate will not be able to get the commands from the default crate.
 
-**Single-crate apps** (a bare `[workspace]` table with no `members`, like many Tauri `src-tauri` layouts) are scanned automatically — no `members` override needed.
+**Single-crate apps** with a bare `[workspace]` table (common in `src-tauri` layouts) are detected automatically — no `members` override needed.
 
 ---
 
 ## Usage
 
-### Command Collection
-
-Annotate your Tauri command functions with `#[auto_collect_command]` to automatically collect them:
+Annotate your commands with `#[tauri::command]`. Add `#[specta::specta]` to any command that should also appear in the TypeScript bindings. Nothing else is required.
 
 ```rust
 #[tauri::command]
-#[auto_collect_command]
-fn greet(name: String) -> String {
-    format!("Hello, {}!", name)
-}
-```
-
-Generate a `tauri::generate_handler!` invocation:
-
-```rust
-tauri_collect_commands!();
-```
-
-Generate a `tauri_specta::collect_commands!` invocation:
-
-```rust
-specta_collect_commands!();
-```
-
-### Note 
-
-If you do not want to have to annotate every command with `#[auto_collect_command]`, you can do this in the `build.rs`.
-
-```rust
-    fn main() {
-        tauri_helper::generate_command_file(tauri_helper::TauriHelperOptions::new(true));
-        tauri_build::build();
-    }
-```
-
-This will tell the build script to get every tauri_command available in every member of the workspace.
-
-This is not recommended as it can lead to adding functions that are not meant to be exported.
-
----
-
-If your workspace contains multiple crates, you must export all functions in the root file (`lib.rs`) of each crate.
-
-### Example
-
-In `my_commands.rs`:
-```rust
-#[tauri::command]
-#[auto_collect_command]
-fn greet(name: String) -> String {
-    format!("Hello, {}!", name)
-}
-```
-
-In `lib.rs`:
-```rust
-pub mod my_commands;
-pub use my_commands::*;
-```
-
-> **Note:** This is required because the feature that enables full module path retrieval is still only available in the nightly version of Rust.
-
-## Example
-
-Here’s a complete example of using `tauri_helper` in a Tauri application:
-
-```rust
-#[tauri::command]
-#[auto_collect_command]
+#[specta::specta]
 fn greet(name: String) -> String {
     format!("Hello, {}!", name)
 }
 
 #[tauri::command]
-#[auto_collect_command]
+#[specta::specta]
 fn calculate_sum(a: i32, b: i32) -> i32 {
     a + b
 }
+```
 
+Then wire up the handler and specta builder:
+
+```rust
 fn main() {
-    let builder: tauri_specta::Builder = tauri_specta::Builder::<tauri::Wry>::new()
+    let builder = tauri_specta::Builder::<tauri::Wry>::new()
         .commands(specta_collect_commands!());
 
     #[cfg(debug_assertions)]
     builder
         .export(
-            Typescript::default().bigint(specta_typescript::BigIntExportBehavior::Number),
+            specta_typescript::Typescript::default()
+                .bigint(specta_typescript::BigIntExportBehavior::Number),
             "../src/bindings.ts",
         )
-        .expect("should work");
+        .expect("failed to export TypeScript bindings");
 
     tauri::Builder::default()
         .invoke_handler(tauri_collect_commands!())
@@ -184,32 +121,23 @@ fn main() {
 
 ## Feature Flags
 
-- **`tracing`**: Enables `tracing` support in the `WithLogging` macro. This feature is optional and must be explicitly enabled.
+- **`tracing`**: Enables the `WithLogging` derive macro. Optional; must be explicitly enabled.
 
 ---
 
 ## Notes
 
-- **`WithLogging` Stability**: The `WithLogging` macro is experimental and may undergo breaking changes. It is not recommended for production use.
-- **Command Collection**: Ensure that all Tauri commands are annotated with `#[auto_collect_command]` to be included in the generated handlers by default.
-- **Collection Conflict**: Ensure that you are only using an `#[command]` that comes from tauri.
+- **`WithLogging` stability**: Experimental — may have breaking changes. Not recommended for production.
+- **`#[cfg(...)]` and platform-specific commands**: Source scanning runs outside the compiler's cfg resolution, so platform-gated commands are collected on all platforms. Their bodies are still compiled only on the target platform, so this only becomes an issue if the function signature itself references a platform-only type.
 
 ---
 
 ## Contributing
 
-Contributions are welcome! Please open an issue or submit a pull request if you have any improvements or bug fixes.
-
----
-
-## TODO
-
-- `All-In-One` : A macro that collects a command and automatically adds `#[tauri::command]`.
-- `All-In-One` - Specta : Same thing as `All-In-One` but also adding the `#[specta::specta]` macro.
+Contributions are welcome! Please open an issue or submit a pull request.
 
 ---
 
 ## License
 
 This project is licensed under the [MIT License](LICENSE).
-

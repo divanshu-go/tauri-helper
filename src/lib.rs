@@ -1,10 +1,11 @@
 use rayon::prelude::*;
+use std::collections::HashSet;
 use std::env;
 use std::fs::{self, File};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use syn::parse_file;
-use tauri_helper_core::{find_workspace_dir, get_workspace, get_workspace_members};
+use tauri_helper_core::{find_workspace_dir, get_member_pkg_name, get_workspace_members};
 
 pub use tauri_helper_core::types::TauriHelperOptions;
 pub use tauri_helper_macros::*;
@@ -53,65 +54,77 @@ fn collect_rs_files(source_dir: &Path, dir: &Path, files: &mut Vec<SourceFile>) 
         let path = entry.path();
         if path.is_dir() {
             collect_rs_files(source_dir, &path, files);
-        } else if path.extension().and_then(|ext| ext.to_str()) == Some("rs") {
-            if let Some(module_path) = module_path_for_source(source_dir, &path) {
+        } else if path.extension().and_then(|ext| ext.to_str()) == Some("rs")
+            && let Some(module_path) = module_path_for_source(source_dir, &path)
+        {
+            files.push(SourceFile { path, module_path });
+        }
+    }
+}
+
+fn collect_path_module_files(files: &mut Vec<SourceFile>) {
+    let snapshot = files.clone();
+    for source_file in &snapshot {
+        let Ok(content) = fs::read_to_string(&source_file.path) else {
+            continue;
+        };
+        let Ok(ast) = parse_file(&content) else {
+            continue;
+        };
+        for item in &ast.items {
+            let syn::Item::Mod(mod_item) = item else {
+                continue;
+            };
+            if mod_item.content.is_some() {
+                continue;
+            }
+            for attr in &mod_item.attrs {
+                if !attr.path().is_ident("path") {
+                    continue;
+                }
+                let Ok(syn::Expr::Lit(syn::ExprLit {
+                    lit: syn::Lit::Str(path_str),
+                    ..
+                })) = attr.parse_args::<syn::Expr>()
+                else {
+                    continue;
+                };
+                let Some(parent) = source_file.path.parent() else {
+                    continue;
+                };
+                let path = parent.join(path_str.value());
+                if path.extension().and_then(|ext| ext.to_str()) != Some("rs") {
+                    continue;
+                }
+                let mod_name = mod_item.ident.to_string();
+                let module_path = if source_file.module_path.is_empty() {
+                    mod_name
+                } else {
+                    format!("{}::{}", source_file.module_path, mod_name)
+                };
                 files.push(SourceFile { path, module_path });
             }
         }
     }
 }
 
-fn collect_path_module_files(files: &mut Vec<SourceFile>) {
-    for source_file in files.clone() {
-        let Ok(source) = fs::read_to_string(&source_file.path) else {
-            continue;
-        };
-
-        for line in source.lines() {
-            let trimmed = line.trim();
-            let Some(path_attr) = trimmed
-                .strip_prefix("#[path = \"")
-                .and_then(|rest| rest.strip_suffix("\"]"))
-            else {
-                continue;
-            };
-
-            let Some(parent) = source_file.path.parent() else {
-                continue;
-            };
-            let path = parent.join(path_attr);
-            if path.extension().and_then(|ext| ext.to_str()) == Some("rs") {
-                files.push(SourceFile {
-                    path,
-                    module_path: source_file.module_path.clone(),
-                });
-            }
-        }
-    }
-}
-
 fn is_tauri_command_attr(path: &syn::Path) -> bool {
-    path.is_ident("command")
-        || (path.segments.len() == 2
-            && path.segments[0].ident == "tauri"
-            && path.segments[1].ident == "command")
+    path.segments.len() == 2
+        && path.segments[0].ident == "tauri"
+        && path.segments[1].ident == "command"
 }
 
 fn is_specta_attr(path: &syn::Path) -> bool {
-    path.is_ident("specta")
-        || (path.segments.len() == 2
-            && path.segments[0].ident == "specta"
-            && path.segments[1].ident == "specta")
+    path.segments.len() == 2
+        && path.segments[0].ident == "specta"
+        && path.segments[1].ident == "specta"
 }
 
-fn collect_commands_from_source(
-    source_file: &SourceFile,
-    collect_all: bool,
-) -> Vec<CollectedCommand> {
+fn collect_commands_from_source(source_file: &SourceFile) -> Vec<CollectedCommand> {
     let Ok(content) = fs::read_to_string(&source_file.path) else {
         return Vec::new();
     };
-    if !content.contains("tauri::command") && !content.contains("auto_collect_command") {
+    if !content.contains("tauri::command") {
         return Vec::new();
     }
 
@@ -126,27 +139,15 @@ fn collect_commands_from_source(
             continue;
         };
 
-        let has_tauri = func
+        if !func
             .attrs
             .iter()
-            .any(|attr| is_tauri_command_attr(attr.path()));
-        if !has_tauri {
-            continue;
-        }
-
-        if !collect_all
-            && !func
-                .attrs
-                .iter()
-                .any(|attr| attr.path().is_ident("auto_collect_command"))
+            .any(|attr| is_tauri_command_attr(attr.path()))
         {
             continue;
         }
 
-        let specta = func
-            .attrs
-            .iter()
-            .any(|attr| is_specta_attr(attr.path()));
+        let specta = func.attrs.iter().any(|attr| is_specta_attr(attr.path()));
 
         let fn_name = func.sig.ident.to_string();
         let path = if source_file.module_path.is_empty() {
@@ -161,128 +162,73 @@ fn collect_commands_from_source(
     commands
 }
 
-fn full_command_path(crate_name: &str, package_name: &str, command_path: &str) -> String {
-    let crate_name = crate_name.replace('-', "_");
-    let prefix = if crate_name == "src_tauri" {
-        package_name.replace('-', "_")
-    } else {
-        crate_name
-    };
-    format!("{prefix}::{command_path}")
+fn full_command_path(package_name: &str, command_path: &str) -> String {
+    format!("{}::{command_path}", package_name.replace('-', "_"))
 }
 
 fn write_command_list(path: &Path, commands: &[String]) {
-    let mut file = File::create(path).unwrap();
+    let mut file = File::create(path)
+        .unwrap_or_else(|e| panic!("failed to create {}: {e}", path.display()));
     for command in commands {
-        writeln!(file, "{command}").unwrap();
+        writeln!(file, "{command}")
+            .unwrap_or_else(|e| panic!("failed to write to {}: {e}", path.display()));
     }
 }
 
+fn sort_by_fn_name(commands: &mut [String]) {
+    commands.sort_by(|a, b| {
+        let a_fn = a.rsplit("::").next().unwrap_or(a.as_str());
+        let b_fn = b.rsplit("::").next().unwrap_or(b.as_str());
+        a_fn.cmp(b_fn)
+    });
+}
+
 #[allow(clippy::needless_doctest_main)]
-/// Scans the crate for functions annotated with `#[tauri::command]` and optionally `#[auto_collect_command]`,
-/// then generates command list files in the `tauri_commands_list` folder.
+/// Scans each workspace member's `src/` tree for functions annotated with
+/// `#[tauri::command]` and writes two files per crate under
+/// `target/tauri_commands_list/`:
 ///
-/// This function is intended to be used in a `build.rs` script to automate the process of
-/// collecting Tauri commands during the build process. It should be called before invoking
-/// `tauri_build::build()` to ensure the command list is available for the Tauri application.
+/// - `{crate}.txt` — all collected commands (consumed by [`tauri_collect_commands!`])
+/// - `{crate}_specta.txt` — commands that also carry `#[specta::specta]` (consumed by
+///   [`specta_collect_commands!`])
 ///
-/// # Usage
-///
-/// Add the following to your `build.rs` file:
+/// Call this from `build.rs` **before** `tauri_build::build()`:
 ///
 /// ```rust,ignore
 /// fn main() {
-///     // Generate the command file for Tauri
 ///     tauri_helper::generate_command_file(tauri_helper::TauriHelperOptions::default());
-///
-///     // Build the Tauri application
 ///     tauri_build::build();
 /// }
 /// ```
 ///
-/// # Annotations
-///
-/// By default, this function looks for functions annotated with both `#[tauri::command]` and
-/// `#[auto_collect_command]`. For example:
-///
-/// ```rust,ignore
-/// #[tauri::command]
-/// #[auto_collect_command]
-/// fn my_command() {
-///     println!("Some Command")
-/// }
-/// ```
-///
-/// These functions will be automatically collected and written to the `tauri_commands_list` folder.
-///
-/// If the `collect_all` option is set to `true`, the function will collect all `#[tauri::command]`
-/// functions, regardless of whether they have the `#[auto_collect_command]` attribute. However,
-/// this behavior is not recommended unless explicitly needed.
-///
-/// Commands annotated with `#[specta::specta]` are written to a separate `{crate}_specta.txt`
-/// file and are used by [`specta_collect_commands!`].
-///
-/// # Output
-///
-/// For each workspace member, two files may be written under `target/tauri_commands_list/`:
-///
-/// - `{crate}.txt` — all collected commands (used by [`tauri_collect_commands!`])
-/// - `{crate}_specta.txt` — commands that also have `#[specta::specta]` (used by [`specta_collect_commands!`])
-///
-/// Command paths include nested module paths derived from the source tree (for example
-/// `my_crate::commands::greet`). Files referenced via `#[path = "..."]` are included.
-///
-/// Single-crate apps (empty `[workspace].members`) are supported automatically — no need to
-/// pass `members: Some(vec![".".into()])`.
+/// Every `#[tauri::command]` function is collected automatically — no extra
+/// annotation is required. Add `#[specta::specta]` to functions that should also
+/// appear in the TypeScript bindings.
 ///
 /// # Options
 ///
-/// The behavior of this function can be customized using the `TauriHelperOptions` struct:
-///
-/// - **`collect_all`**: When `true`, collects all `#[tauri::command]` functions, even if they lack
-///   the `#[auto_collect_command]` attribute. When `false` (default), only functions with both
-///   `#[tauri::command]` and `#[auto_collect_command]` are collected.
-///
-///   **Recommendation**: Keep this option set to `false` to ensure explicit control over which
-///   commands are included in your Tauri application.
+/// `TauriHelperOptions::members` overrides which workspace members are scanned.
+/// When `None`, `[workspace].members` from the nearest `Cargo.toml` is used; an
+/// empty list (bare `[workspace]` table, common in `src-tauri`) falls back to `"."`.
 ///
 /// # Notes
 ///
-/// - This function should only be called once per build, typically in the `build.rs` script.
-/// - More options are coming such as a list of explicit files that need to be scanned only, if you have any more ideas, please open an issue on Github.
-///
-/// # Example
-///
-/// ```rust,ignore
-/// #[tauri::command]
-/// #[auto_collect_command]
-/// fn greet(name: String) -> String {
-///     format!("Hello, {}!", name)
-/// }
-///
-/// #[tauri::command]
-/// fn calculate_sum(a: i32, b: i32) -> i32 {
-///     a + b
-/// }
-/// ```
-///
-/// With `collect_all` set to `false` (default), only `greet` will be collected. With `collect_all`
-/// set to `true`, both `greet` and `calculate_sum` will be collected.
+/// `#[cfg(...)]`-gated commands are collected on all platforms because source
+/// scanning runs outside the compiler's cfg resolution. Platform-specific commands
+/// will produce linker errors on unsupported platforms if they reference
+/// platform-only APIs in their bodies — guard those bodies with `#[cfg]` as usual.
 ///
 /// # Panics
 ///
-/// This function will panic if:
-/// - The `tauri_commands_list` folder cannot be created or written to.
-/// - No functions matching the criteria are found.
-///
-/// # Errors
-///
-/// If the function encounters an error during file generation, it will log the error and exit the
-/// build process with a non-zero status code.
+/// - `target/tauri_commands_list/` cannot be created or written to.
+/// - A member crate's `Cargo.toml` cannot be read or parsed.
 pub fn generate_command_file(options: TauriHelperOptions) {
-    let workspace_root = find_workspace_dir(Path::new(&env::var("CARGO_MANIFEST_DIR").unwrap()));
+    let workspace_root = find_workspace_dir(
+        Path::new(&env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR not set")),
+    );
     let commands_dir = workspace_root.join("target").join("tauri_commands_list");
-    fs::create_dir_all(&commands_dir).unwrap();
+    fs::create_dir_all(&commands_dir)
+        .unwrap_or_else(|e| panic!("failed to create {}: {e}", commands_dir.display()));
 
     let workspace_members = options.members.clone().unwrap_or_else(|| {
         let members = get_workspace_members(&workspace_root);
@@ -293,31 +239,28 @@ pub fn generate_command_file(options: TauriHelperOptions) {
         }
     });
 
-    let package_name = get_workspace().package.name.replace('-', "_");
-    let collect_all = options.collect_all;
-
-    for member in &workspace_members {
-        println!("cargo:rerun-if-changed={}", member);
-    }
-
     workspace_members.par_iter().for_each(|member| {
         let manifest_dir = workspace_root.join(member);
-        let crate_name = manifest_dir
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or_default()
-            .to_string();
+        let package_name = get_member_pkg_name(&manifest_dir);
 
         let src_dir = manifest_dir.join("src");
+        // Watch the src dir so cargo rebuilds when files are added or removed.
+        println!("cargo:rerun-if-changed={}", src_dir.display());
+
         let mut source_files = Vec::new();
         collect_rs_files(&src_dir, &src_dir, &mut source_files);
         collect_path_module_files(&mut source_files);
+
+        // Deduplicate: a file can appear from both the filesystem walk and a #[path] reference.
+        let mut seen_paths = HashSet::new();
+        source_files.retain(|f| seen_paths.insert(f.path.clone()));
+
         source_files.sort_by(|left, right| left.path.cmp(&right.path));
 
         let mut commands = Vec::new();
         for source_file in &source_files {
             println!("cargo:rerun-if-changed={}", source_file.path.display());
-            commands.extend(collect_commands_from_source(source_file, collect_all));
+            commands.extend(collect_commands_from_source(source_file));
         }
 
         if commands.is_empty() {
@@ -326,19 +269,20 @@ pub fn generate_command_file(options: TauriHelperOptions) {
 
         let mut tauri_commands: Vec<String> = commands
             .iter()
-            .map(|command| full_command_path(&crate_name, &package_name, &command.path))
+            .map(|command| full_command_path(&package_name, &command.path))
             .collect();
-        tauri_commands.sort();
+        sort_by_fn_name(&mut tauri_commands);
         tauri_commands.dedup();
 
         let mut specta_commands: Vec<String> = commands
             .iter()
             .filter(|command| command.specta)
-            .map(|command| full_command_path(&crate_name, &package_name, &command.path))
+            .map(|command| full_command_path(&package_name, &command.path))
             .collect();
-        specta_commands.sort();
+        sort_by_fn_name(&mut specta_commands);
         specta_commands.dedup();
 
+        let crate_name = package_name.replace('-', "_");
         write_command_list(
             &commands_dir.join(format!("{crate_name}.txt")),
             &tauri_commands,
