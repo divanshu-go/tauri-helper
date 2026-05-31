@@ -82,11 +82,32 @@ fn collect_path_module_files(files: &mut Vec<SourceFile>) {
                 if !attr.path().is_ident("path") {
                     continue;
                 }
-                let Ok(syn::Expr::Lit(syn::ExprLit {
-                    lit: syn::Lit::Str(path_str),
-                    ..
-                })) = attr.parse_args::<syn::Expr>()
-                else {
+                let path_str = match &attr.meta {
+                    syn::Meta::NameValue(meta) => {
+                        if let syn::Expr::Lit(syn::ExprLit {
+                            lit: syn::Lit::Str(lit_str),
+                            ..
+                        }) = &meta.value
+                        {
+                            Some(lit_str.clone())
+                        } else {
+                            None
+                        }
+                    }
+                    syn::Meta::List(_) => {
+                        if let Ok(syn::Expr::Lit(syn::ExprLit {
+                            lit: syn::Lit::Str(lit_str),
+                            ..
+                        })) = attr.parse_args::<syn::Expr>()
+                        {
+                            Some(lit_str)
+                        } else {
+                            None
+                        }
+                    }
+                    _ => None,
+                };
+                let Some(path_str) = path_str else {
                     continue;
                 };
                 let Some(parent) = source_file.path.parent() else {
