@@ -1,6 +1,6 @@
 use proc_macro::TokenStream;
 use quote::quote;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::{
     collections::BTreeSet,
     env,
@@ -9,7 +9,7 @@ use std::{
 #[cfg(feature = "tracing")]
 use syn::{Data, DeriveInput, Fields};
 use syn::{LitBool, parse_macro_input};
-use tauri_helper_core::{find_workspace_dir, get_workspace_pkg_name};
+use tauri_helper_core::{commands_list_dir, find_workspace_dir, get_workspace_pkg_name};
 
 #[cfg(feature = "tracing")]
 fn is_string_type(ty: &syn::Type) -> bool {
@@ -154,7 +154,10 @@ fn is_specta_command_file(path: &Path) -> bool {
 fn collect_commands(specta_only: bool) -> Vec<String> {
     let manifest_dir = env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR not set");
     let workspace_root = find_workspace_dir(Path::new(&manifest_dir));
-    let commands_dir = workspace_root.join("target").join("tauri_commands_list");
+    // Prefer the path build.rs exported (honors CARGO_TARGET_DIR / build.target-dir).
+    let commands_dir = env::var_os("TAURI_HELPER_COMMANDS_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| commands_list_dir(&workspace_root));
 
     let calling_crate = get_workspace_pkg_name().replace('-', "_");
     let crate_prefix = format!("{calling_crate}::");

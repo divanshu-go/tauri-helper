@@ -5,7 +5,9 @@ use std::fs::{self, File};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use syn::parse_file;
-use tauri_helper_core::{find_workspace_dir, get_member_pkg_name, get_workspace_members};
+use tauri_helper_core::{
+    find_workspace_dir, get_member_pkg_name, get_workspace_members, commands_list_dir,
+};
 
 pub use tauri_helper_core::types::TauriHelperOptions;
 pub use tauri_helper_macros::*;
@@ -247,9 +249,15 @@ pub fn generate_command_file(options: TauriHelperOptions) {
     let workspace_root = find_workspace_dir(
         Path::new(&env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR not set")),
     );
-    let commands_dir = workspace_root.join("target").join("tauri_commands_list");
+    let commands_dir = commands_list_dir(&workspace_root);
     fs::create_dir_all(&commands_dir)
         .unwrap_or_else(|e| panic!("failed to create {}: {e}", commands_dir.display()));
+    // Proc macros cannot reliably see CARGO_TARGET_DIR; pass the resolved path.
+    println!(
+        "cargo:rustc-env=TAURI_HELPER_COMMANDS_DIR={}",
+        commands_dir.display()
+    );
+    println!("cargo:rerun-if-env-changed=CARGO_TARGET_DIR");
 
     let workspace_members = options.members.clone().unwrap_or_else(|| {
         let members = get_workspace_members(&workspace_root);
@@ -316,4 +324,36 @@ pub fn generate_command_file(options: TauriHelperOptions) {
             );
         }
     });
+
+    // Bust sccache / rustc fingerprints when the collected command surface changes.
+    let mut fingerprint = String::new();
+    if let Ok(entries) = fs::read_dir(&commands_dir) {
+        let mut paths: Vec<_> = entries.flatten().map(|e| e.path()).collect();
+        paths.sort();
+        for path in paths {
+            if path.extension().and_then(|e| e.to_str()) != Some("txt") {
+                continue;
+            }
+            if let Ok(content) = fs::read_to_string(&path) {
+                fingerprint.push_str(path.file_name().and_then(|n| n.to_str()).unwrap_or(""));
+                fingerprint.push('\n');
+                fingerprint.push_str(&content);
+                fingerprint.push('\n');
+            }
+        }
+    }
+    println!(
+        "cargo:rustc-env=TAURI_HELPER_COMMANDS_FINGERPRINT={}",
+        simple_fingerprint(&fingerprint)
+    );
+}
+
+fn simple_fingerprint(input: &str) -> u64 {
+    // FNV-1a 64-bit; stable across runs, no extra deps.
+    let mut hash: u64 = 0xcbf29ce484222325;
+    for byte in input.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    hash
 }
