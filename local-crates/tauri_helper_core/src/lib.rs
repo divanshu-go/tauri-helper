@@ -22,13 +22,21 @@ pub fn find_workspace_dir(start_dir: &Path) -> PathBuf {
 
 /// Directory for generated command list txt files.
 ///
-/// Prefers `CARGO_TARGET_DIR` (cargo `build.target-dir` / `--target-dir`).
-/// Falls back to `<workspace>/target`.
+/// Prefer deriving from `OUT_DIR` (always set in build scripts and points at the
+/// real target dir, including `build.target-dir` / sccache / sandbox overrides).
+/// Then `CARGO_TARGET_DIR`. Finally `<workspace>/target`.
 pub fn commands_list_dir(workspace_root: &Path) -> PathBuf {
-    let target_dir = env::var_os("CARGO_TARGET_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| workspace_root.join("target"));
-    target_dir.join("tauri_commands_list")
+    if let Some(out_dir) = env::var_os("OUT_DIR") {
+        let out = PathBuf::from(out_dir);
+        // OUT_DIR = <target>/<profile>/build/<unit>/out
+        if let Some(target_dir) = out.ancestors().nth(4) {
+            return target_dir.join("tauri_commands_list");
+        }
+    }
+    if let Some(target) = env::var_os("CARGO_TARGET_DIR") {
+        return PathBuf::from(target).join("tauri_commands_list");
+    }
+    workspace_root.join("target").join("tauri_commands_list")
 }
 
 pub fn get_workspace_members(workspace_root: &Path) -> Vec<String> {
